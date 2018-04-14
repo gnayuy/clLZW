@@ -1,46 +1,32 @@
 // tiffimageio.cpp
 
 //
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sstream>
-#include <iostream>
-#include <fstream>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <set>
-#include <time.h>
-#include <errno.h>
-#include <queue>
-#include <dirent.h>
-#include <cstring>
-#include <math.h>
-
-//#include <omp.h>
-
-#include "tiffio.h"
-#include "tiffio.hxx"
-
-using namespace std;
-
-
-
-
-
+#include "tiffimageio.h"
 
 //
-int main(int argc, char*argv[])
+TIFFIO::TIFFIO(string filepath)
 {
-    //
-    char *filename = const_cast<char*>(string(argv[1]).c_str());
-
-    //
     TIFFSetWarningHandler(0);
     TIFFSetErrorHandler(0);
 
+    filename = filepath;
+
+    p = NULL;
+
+    readHeaders = false;
+}
+TIFFIO::~TIFFIO()
+{
+    if(p)
+    {
+        delete []p;
+    }
+}
+
+int TIFFIO::getHeader()
+{
     //
-    TIFF *input = TIFFOpen(filename,"r");
+    TIFF *input = TIFFOpen(filename.c_str(),"r");
     if (!input)
     {
         cout<<"cannot open TIFF file "<<filename<<endl;
@@ -48,69 +34,271 @@ int main(int argc, char*argv[])
     }
 
     //
-    uint32 width, length;
-
-    if (!TIFFGetField(input, TIFFTAG_IMAGEWIDTH, &width))
+    if(!TIFFGetField(input, TIFFTAG_IMAGEWIDTH, &width))
     {
         TIFFClose(input);
         return -1;
     }
 
-    if (!TIFFGetField(input, TIFFTAG_IMAGELENGTH, &length))
+    if(!TIFFGetField(input, TIFFTAG_IMAGELENGTH, &height))
     {
         TIFFClose(input);
         return -1;
     }
 
-    uint32 rowsperstrip;
-
-    if (!TIFFGetField(input, TIFFTAG_ROWSPERSTRIP, &rowsperstrip))
+    if(!TIFFGetField(input, TIFFTAG_ROWSPERSTRIP, &rowsperstrip))
     {
         TIFFClose(input);
         return -1;
     }
 
-    tsize_t stripsize  = TIFFStripSize(input);
+    stripsize = TIFFStripSize(input);
+    nstrips = TIFFNumberOfStrips(input);
 
-    cout<<"image size "<<width<<"x"<<length<<endl;
-    cout<<"strip size "<<stripsize<<endl;
-    cout<<"rowsperstrip "<<rowsperstrip<<endl;
-
-    uint32 bitspersample;
-    if (!TIFFGetField(input, TIFFTAG_BITSPERSAMPLE, &bitspersample))
+    if(!TIFFGetField(input, TIFFTAG_BITSPERSAMPLE, &bitspersample))
     {
         TIFFClose(input);
         return -1;
     }
 
-    cout<<"bitspersample "<<bitspersample<<endl;
-
-    tstrip_t s, ns = TIFFNumberOfStrips(input);
-    uint32 row = 0;
-    //tdata_t buf = _TIFFmalloc(stripsize);
-    for (s = 0; s < ns && row < length; s++)
+    if(!TIFFGetField(input, TIFFTAG_SAMPLESPERPIXEL, &samplesperpixel))
     {
-        tsize_t cc = (row + rowsperstrip > length) ? TIFFVStripSize(input, length - row) : stripsize;
-
-        cout<<"cc "<<cc<<" - "<<s<<endl;
-
-//        if(TIFFReadEncodedStrip(input, s, buf, cc) < 0)
-//        {
-//            _TIFFfree(buf);
-//            TIFFClose(input);
-//            return -1;
-//        }
-
-        row += rowsperstrip;
+        samplesperpixel = 1;
     }
 
+    if(!TIFFGetField(input, TIFFTAG_PAGENUMBER, &currentpage, &depth))
+    {
+        depth = 1;
+        while ( TIFFReadDirectory(input) )
+        {
+            depth++;
+        }
+    }
 
     //
-    //_TIFFfree(buf);
+    if(!TIFFGetFieldDefaulted(input, TIFFTAG_COMPRESSION, &compression))
+    {
+        TIFFClose(input);
+        return -1;
+    }
+
+    //
+    if(TIFFIsTiled(input))
+    {
+        TIFFClose(input);
+        cout<<"Tiled TIFF image is not supported"<<endl;
+        return -1;
+    }
+
+    //
+    if(!TIFFGetField(input, TIFFTAG_PLANARCONFIG, &config))
+    {
+        TIFFClose(input);
+        return -1;
+    }
+
+    if(config!=PLANARCONFIG_CONTIG || compression!=COMPRESSION_NONE || compression!=COMPRESSION_LZW)
+    {
+        cout<<"Only supports PLANARCONFIG_CONTIG and COMPRESSION_LZW"<<endl;
+        return -1;
+    }
 
     //
     TIFFClose(input);
 
+    //
+    readHeaders = true;
+
+    //
+    return 0;
+}
+
+int TIFFIO::read()
+{
+    //
+    if(readHeaders==false)
+    {
+        getHeader();
+    }
+
+    //
+    long size = width*height*depth*samplesperpixel*bitspersample/8;
+
+    try
+    {
+        p = new unsigned char [size];
+    }
+    catch(...)
+    {
+        cout<<"failed alloc memory"<<endl;
+        return -1;
+    }
+
+    //
+    TIFF *input = TIFFOpen(filename.c_str(),"r");
+    if (!input)
+    {
+        cout<<"cannot open TIFF file "<<filename<<endl;
+        return -1;
+    }
+
+    //
+    for(uint32 z=0; z<depth; z++)
+    {
+        //
+        uint8* bufp = p + z*width*height*samplesperpixel*bitspersample/8;
+
+        _TIFFmemset(bufp, 0, stripsize);
+
+        tstrip_t s;
+        uint32 row = 0;
+
+        for (s = 0; s < nstrips; s++)
+        {
+            tsize_t cc = (row + rowsperstrip > height) ? TIFFVStripSize(input, height - row) : stripsize;
+            if (TIFFReadEncodedStrip(input, s, bufp, cc) < 0)
+            {
+                TIFFError(TIFFFileName(input), "Error, can't read strip %lu", (unsigned long) s);
+            }
+            row += rowsperstrip;
+            bufp += cc;
+        }
+
+        if(depth > 1)
+        {
+            TIFFReadDirectory(input);
+        }
+    }
+
+    //
+    TIFFClose(input);
+
+    //
+    return 0;
+}
+
+int TIFFIO::write()
+{
+    //
+    TIFF *output = TIFFOpen(filename.c_str(),"w");
+    if (!output)
+    {
+        cout<<"cannot open TIFF file "<<filename<<endl;
+        return -1;
+    }
+
+    //
+    if(depth > 1)
+    {
+        TIFFCreateDirectory(output);
+    }
+
+    for (uint32 page = 0; page < depth; page++ )
+    {
+        //
+        uint8* bufp = p + page*width*height*samplesperpixel*bitspersample/8;
+
+        //
+        TIFFSetDirectory(output, page);
+        TIFFSetField(output, TIFFTAG_IMAGEWIDTH, width);
+        TIFFSetField(output, TIFFTAG_IMAGELENGTH, height);
+        TIFFSetField(output, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+        TIFFSetField(output, TIFFTAG_SAMPLESPERPIXEL, samplesperpixel);
+        TIFFSetField(output, TIFFTAG_BITSPERSAMPLE, bitspersample);
+        TIFFSetField(output, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+
+        if(bitspersample==8)
+        {
+            TIFFSetField(output, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+        }
+        else if(bitspersample==16)
+        {
+            TIFFSetField(output, TIFFTAG_SAMPLEFORMAT, SAMPLEFORMAT_UINT);
+        }
+        else
+        {
+            cout<<"Data type is not supported"<<endl;
+            return -1;
+        }
+
+        TIFFSetField(output, TIFFTAG_SOFTWARE, "clTIFFimageIO gnayuy 2018"); //
+
+        TIFFSetField(output, TIFFTAG_COMPRESSION, compression);
+
+        uint16 photometric = ( samplesperpixel == 1 ) ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB;
+
+        int predictor;
+        if ( compression == COMPRESSION_LZW )
+        {
+            predictor = 2;
+            TIFFSetField(output, TIFFTAG_PREDICTOR, predictor);
+        }
+
+        TIFFSetField(output, TIFFTAG_PHOTOMETRIC, photometric);
+
+        //TIFFSetField( output, TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(output, rowsperstrip) );
+        TIFFSetField( output, TIFFTAG_ROWSPERSTRIP, (rowsperstrip == -1) ? height : rowsperstrip);
+
+        if ( depth > 1 )
+        {
+            TIFFSetField(output, TIFFTAG_SUBFILETYPE, FILETYPE_PAGE);
+            TIFFSetField(output, TIFFTAG_PAGENUMBER, page, depth);
+        }
+        if ( rowsperstrip == -1 )
+        {
+            TIFFSetDirectory(output,0);
+            if(!TIFFWriteEncodedStrip(output, 0, bufp, width*height*samplesperpixel*bitspersample/8))
+            {
+                cout<<"fail to write encoded strip"<<endl;
+                return -1;
+            }
+        }
+        else
+        {
+            tstrip_t s;
+            uint32 row = 0;
+
+            for (s = 0; s < nstrips; s++)
+            {
+                tsize_t cc = (row + rowsperstrip > height) ? TIFFVStripSize(output, height - row) : stripsize;
+                if (TIFFWriteEncodedStrip(output, s, bufp, cc) < 0)
+                {
+                    TIFFError(TIFFFileName(output), "Error, can't read strip %lu", (unsigned long) s);
+                }
+                row += rowsperstrip;
+                bufp += cc;
+            }
+        }
+
+        if ( depth > 1)
+        {
+            TIFFWriteDirectory(output);
+        }
+    }
+
+    //
+    TIFFClose(output);
+
+    //
+    return 0;
+}
+
+//
+int main(int argc, char*argv[])
+{
+    if(argc<1)
+    {
+        cout<<"please put a tiff file name as an input"<<endl;
+        return -1;
+    }
+
+    //
+    TIFFIO tiffimage((string(argv[1])));
+    tiffimage.read();
+
+    tiffimage.filename = string(argv[2]);
+
+    tiffimage.write();
 
     //
     return 0;
