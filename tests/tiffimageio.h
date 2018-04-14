@@ -22,6 +22,9 @@
 
 using namespace std;
 
+//COMPRESSION_NONE = 1;
+//COMPRESSION_LZW = 5;
+
 //
 class TIFFIO
 {

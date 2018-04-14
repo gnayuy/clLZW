@@ -97,7 +97,7 @@ int TIFFIO::getHeader()
         return -1;
     }
 
-    if(config!=PLANARCONFIG_CONTIG || compression!=COMPRESSION_NONE || compression!=COMPRESSION_LZW)
+    if(config!=PLANARCONFIG_CONTIG || !(compression==COMPRESSION_NONE || compression==COMPRESSION_LZW))
     {
         cout<<"Only supports PLANARCONFIG_CONTIG and COMPRESSION_LZW"<<endl;
         return -1;
@@ -162,6 +162,8 @@ int TIFFIO::read()
             }
             row += rowsperstrip;
             bufp += cc;
+
+            //cout<<"stripsize "<<cc<<" at strip #"<<s<<endl;
         }
 
         if(depth > 1)
@@ -296,9 +298,14 @@ int main(int argc, char*argv[])
     TIFFIO tiffimage((string(argv[1])));
     tiffimage.read();
 
-    tiffimage.filename = string(argv[2]);
+    if(argc>3)
+    {
+        tiffimage.filename = string(argv[2]);
 
-    tiffimage.write();
+        tiffimage.compression = atoi(argv[3]); // 1 or 5
+
+        tiffimage.write();
+    }
 
     //
     return 0;
